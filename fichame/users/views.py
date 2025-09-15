@@ -11,10 +11,7 @@ class IsAuthenticated(permissions.IsAuthenticated):
 class UserViewSet(mixins.ListModelMixin,
                   mixins.RetrieveModelMixin,
                   viewsets.GenericViewSet):
-    """
-    - Trabajador: solo ve su propio usuario.
-    - Empresa/Admin/Staff: puede listar/ver usuarios.
-    """
+
     serializer_class = UserSerializer
     permission_classes = [IsAuthenticated]
 
