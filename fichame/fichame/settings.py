@@ -15,6 +15,7 @@ DEBUG = True
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://ficha-me-frontend.vercel.app"
 ]
 
 ALLOWED_HOSTS = ["127.0.0.1", "localhost", "fichamebackend.onrender.com"]
