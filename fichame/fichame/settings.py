@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -70,12 +72,22 @@ WSGI_APPLICATION = 'fichame.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+# DB por defecto (sqlite para local si no hay DATABASE_URL)
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
     }
 }
+
+# Si existe DATABASE_URL, la usamos (Render)
+db_url = os.getenv("DATABASE_URL")
+if db_url:
+    DATABASES["default"] = dj_database_url.config(
+        default=db_url,
+        conn_max_age=600,
+        ssl_require=True
+    )
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
