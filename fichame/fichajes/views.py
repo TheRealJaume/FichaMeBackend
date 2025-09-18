@@ -1,100 +1,137 @@
 # fichajes/views.py
-from datetime import datetime
-from django.utils.timezone import now
-from rest_framework import viewsets, permissions, status
-from rest_framework.decorators import action
-from rest_framework.response import Response
+from rest_framework import viewsets, permissions, decorators, response, status
+from django.utils import timezone
+from datetime import datetime, timedelta
 from .models import Fichaje
 from .serializers import FichajeSerializer
-
-class IsAuthenticated(permissions.IsAuthenticated):
-    pass
+from rest_framework.exceptions import PermissionDenied
 
 class FichajeViewSet(viewsets.ModelViewSet):
     """
-    ViewSet principal de Fichajes con acciones personalizadas:
-    - POST /api/fichajes/entrada/  -> fichar entrada (acción)
-    - POST /api/fichajes/salida/   -> fichar salida (acción)
-    - GET  /api/fichajes/hoy/      -> fichaje de hoy del usuario
-    - GET  /api/fichajes/resumen/?mes=MM&anio=YYYY -> total horas del mes
-    CRUD:
-    - Trabajador: opera sobre sus propios fichajes.
-    - Empresa/Admin/Staff: puede listar/ver todos (y crear si lo deseas).
+    CRUD de segmentos de fichaje + acciones personalizadas:
+      POST /api/fichajes/entrada/  -> abre nuevo segmento (si no hay uno abierto)
+      POST /api/fichajes/salida/   -> cierra el último segmento abierto
+      GET  /api/fichajes/hoy/      -> segmentos del día actual + open + totales
+      GET  /api/fichajes/resumen/?year=YYYY&month=MM -> totales por mes
     """
     serializer_class = FichajeSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
         qs = Fichaje.objects.select_related("user").order_by("-fecha", "-id")
-        if user.is_staff or getattr(user, "role", None) in ("empresa", "admin"):
+        role = getattr(user, "role", "trabajador")
+        if role in ("admin", "empresa") or user.is_staff:
+            # (Producción: filtra por compañía aquí)
             return qs
         return qs.filter(user=user)
 
     def perform_create(self, serializer):
-        # Asigna el usuario autenticado por defecto en altas manuales
         serializer.save(user=self.request.user)
 
     def perform_update(self, serializer):
-        # Evita reasignar fichajes a otro usuario si no es staff/admin
+        # Evita reasignar user si no eres admin/empresa/staff
         instance = serializer.instance
         user = self.request.user
-        if not (user.is_staff or getattr(user, "role", None) in ("empresa", "admin")):
-            serializer.save(user=instance.user)
-        else:
+        role = getattr(user, "role", "trabajador")
+        if user.is_staff or role in ("admin", "empresa"):
             serializer.save()
+        else:
+            serializer.save(user=instance.user)
 
-    # ---------- ACCIONES PERSONALIZADAS ----------
+    # ------------ ACCIONES PERSONALIZADAS ------------
 
-    @action(detail=False, methods=["post"], url_path="entrada")
-    def fichar_entrada(self, request):
-        today = now().date()
-        fichaje, created = Fichaje.objects.get_or_create(user=request.user, fecha=today)
-        if fichaje.hora_inicio:
-            return Response({"detail": "Ya has fichado la entrada hoy."}, status=status.HTTP_400_BAD_REQUEST)
-        fichaje.hora_inicio = now().time()
-        fichaje.save()
-        return Response(self.get_serializer(fichaje).data, status=status.HTTP_200_OK)
+    @decorators.action(detail=False, methods=["post"], url_path="entrada")
+    def entrada(self, request):
+        # Si existe un segmento abierto (hora_fin is null), no se puede abrir otro
+        abierto = Fichaje.objects.filter(user=request.user, hora_inicio__isnull=False, hora_fin__isnull=True).exists()
+        if abierto:
+            return response.Response({"detail": "Ya tienes un tramo abierto. Ficha salida antes de iniciar otro."},
+                                     status=status.HTTP_400_BAD_REQUEST)
+        now_local = timezone.localtime()
+        f = Fichaje.objects.create(
+            user=request.user,
+            fecha=timezone.localdate(),
+            hora_inicio=now_local.time()
+        )
+        return response.Response(self.get_serializer(f).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=False, methods=["post"], url_path="salida")
-    def fichar_salida(self, request):
-        today = now().date()
-        try:
-            fichaje = Fichaje.objects.get(user=request.user, fecha=today)
-        except Fichaje.DoesNotExist:
-            return Response({"detail": "No hay entrada registrada hoy."}, status=status.HTTP_400_BAD_REQUEST)
-        if fichaje.hora_fin:
-            return Response({"detail": "Ya has fichado la salida hoy."}, status=status.HTTP_400_BAD_REQUEST)
-        fichaje.hora_fin = now().time()
-        fichaje.save()
-        return Response(self.get_serializer(fichaje).data, status=status.HTTP_200_OK)
+    @decorators.action(detail=False, methods=["post"], url_path="salida")
+    def salida(self, request):
+        # Cierra el último segmento abierto (independiente del día)
+        abierto = Fichaje.objects.filter(user=request.user, hora_inicio__isnull=False, hora_fin__isnull=True).order_by("-fecha", "-id").first()
+        if not abierto:
+            return response.Response({"detail": "No tienes ningún tramo abierto."},
+                                     status=status.HTTP_400_BAD_REQUEST)
+        now_local = timezone.localtime()
+        abierto.hora_fin = now_local.time()
+        # Si cruzó medianoche, lo permitimos y calculamos duración en serializer (sumando 1 día)
+        abierto.save()
+        return response.Response(self.get_serializer(abierto).data)
 
-    @action(detail=False, methods=["get"], url_path="hoy")
+    @decorators.action(detail=False, methods=["get"], url_path="hoy")
     def hoy(self, request):
-        today = now().date()
-        try:
-            fichaje = Fichaje.objects.get(user=request.user, fecha=today)
-            return Response(self.get_serializer(fichaje).data)
-        except Fichaje.DoesNotExist:
-            return Response({"detail": "Sin fichaje hoy."}, status=status.HTTP_404_NOT_FOUND)
+        today = timezone.localdate()
+        qs = Fichaje.objects.filter(user=request.user, fecha=today).order_by("hora_inicio", "id")
 
-    @action(detail=False, methods=["get"], url_path="resumen")
+        # Estado abierto
+        abierto = Fichaje.objects.filter(user=request.user, hora_inicio__isnull=False, hora_fin__isnull=True).exists()
+
+        # Totales del día (suma de segmentos cerrados y si hay abierto cuenta hasta ahora)
+        total_minutes = 0
+        for seg in qs:
+            if seg.hora_inicio and seg.hora_fin:
+                start_dt = datetime.combine(seg.fecha, seg.hora_inicio)
+                end_dt = datetime.combine(seg.fecha, seg.hora_fin)
+                if end_dt < start_dt:
+                    end_dt += timedelta(days=1)
+                total_minutes += max(0, int((end_dt - start_dt).total_seconds() // 60))
+        if abierto:
+            # si hay uno abierto de HOY, acumulamos tiempo parcial hasta ahora
+            seg_abierto = Fichaje.objects.filter(user=request.user, fecha=today, hora_fin__isnull=True).order_by("-id").first()
+            if seg_abierto and seg_abierto.hora_inicio:
+                start_dt = datetime.combine(seg_abierto.fecha, seg_abierto.hora_inicio)
+                now_local = timezone.localtime()
+                end_dt = datetime.combine(seg_abierto.fecha, now_local.time())
+                if end_dt < start_dt:
+                    end_dt += timedelta(days=1)
+                total_minutes += max(0, int((end_dt - start_dt).total_seconds() // 60))
+
+        return response.Response({
+            "date": str(today),
+            "open": bool(abierto),
+            "total_minutes": total_minutes,
+            "total_hours": round(total_minutes / 60, 2),
+            "segments": FichajeSerializer(qs, many=True).data
+        })
+
+    @decorators.action(detail=False, methods=["get"], url_path="resumen")
     def resumen(self, request):
-        """Resumen mensual del usuario autenticado (total horas)."""
-        mes = int(request.query_params.get("mes", now().month))
-        anio = int(request.query_params.get("anio", now().year))
-        qs = Fichaje.objects.filter(user=request.user, fecha__year=anio, fecha__month=mes)
+        year = int(request.query_params.get("year", timezone.localdate().year))
+        month = int(request.query_params.get("month", timezone.localdate().month))
+        qs = self.get_queryset().filter(fecha__year=year, fecha__month=month)
 
-        total_segundos = 0
+        total_minutes = 0
         for f in qs:
             if f.hora_inicio and f.hora_fin:
-                dt_ini = datetime.combine(f.fecha, f.hora_inicio)
-                dt_fin = datetime.combine(f.fecha, f.hora_fin)
-                total_segundos += max(0, int((dt_fin - dt_ini).total_seconds()))
+                start_dt = datetime.combine(f.fecha, f.hora_inicio)
+                end_dt = datetime.combine(f.fecha, f.hora_fin)
+                if end_dt < start_dt:
+                    end_dt += timedelta(days=1)
+                total_minutes += max(0, int((end_dt - start_dt).total_seconds() // 60))
 
-        return Response({
-            "anio": anio,
-            "mes": mes,
-            "total_horas": round(total_segundos / 3600, 2),
-            "fichajes": FichajeSerializer(qs, many=True).data
+        return response.Response({
+            "year": year,
+            "month": month,
+            "total_minutes": total_minutes,
+            "total_hours": round(total_minutes / 60, 2),
+            "segments_count": qs.count()
         })
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        role = getattr(user, "role", "trabajador")
+        # Solo admin/empresa/staff pueden borrar cualquiera; el resto, solo los suyos
+        if not (user.is_staff or role in ("admin", "empresa")) and instance.user_id != user.id:
+            raise PermissionDenied("No puedes eliminar este registro.")
+        instance.delete()
