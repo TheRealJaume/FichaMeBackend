@@ -86,7 +86,7 @@ if db_url:
     DATABASES["default"] = dj_database_url.config(
         default=db_url,
         conn_max_age=600,
-        ssl_require=True
+        ssl_require=False
     )
 
 # Password validation
